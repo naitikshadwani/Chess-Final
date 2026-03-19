@@ -1,1 +1,292 @@
-hello  
+import pygame
+import time
+import copy
+
+pygame.init()
+
+# --- 1. Settings & Colors ---
+BOARD_SIZE = 600
+SIDEBAR_WIDTH = 200
+WIDTH, HEIGHT = BOARD_SIZE + SIDEBAR_WIDTH, BOARD_SIZE
+SQ_SIZE = BOARD_SIZE // 8
+
+WHITE_TILE, BLACK_TILE = (238, 238, 210), (78, 120, 55)
+SIDEBAR_COLOR = (255, 255, 255)
+SHADOW_COLOR = (0, 0, 0, 150)
+
+font_main = pygame.font.SysFont('Arial', 30, bold=True)
+font_big = pygame.font.SysFont('Arial', 50, bold=True)
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Chess")
+
+# --- 2. Asset Loading ---
+def load_piece(name):
+    return pygame.transform.scale(pygame.image.load(name + ".png"), (SQ_SIZE, SQ_SIZE))
+
+IMAGES = {
+    'w_pawn': load_piece('wP'), 'w_rook': load_piece('wR'),
+    'w_knight': load_piece('wN'), 'w_bishop': load_piece('wB'),
+    'w_queen': load_piece('wQ'), 'w_king': load_piece('wK'),
+    'b_pawn': load_piece('bP'), 'b_rook': load_piece('bR'),
+    'b_knight': load_piece('bN'), 'b_bishop': load_piece('bB'),
+    'b_queen': load_piece('bQ'), 'b_king': load_piece('bK')
+}
+
+# --- 3. Game State ---
+pieces = []
+turn = "white"
+white_time, black_time = 600, 600
+game_over = False
+winner = ""
+en_passant_target = None
+
+def reset_game():
+    global pieces, turn, white_time, black_time, game_over, last_time, en_passant_target
+    pieces = []
+    # Initialize Pawns with 'moved' flag
+    for i in range(8):
+        pieces.append({'type': 'pawn', 'color': 'white', 'pos': (i, 6), 'moved': False})
+        pieces.append({'type': 'pawn', 'color': 'black', 'pos': (i, 1), 'moved': False})
+    types = ['rook', 'knight', 'bishop', 'queen', 'king', 'bishop', 'knight', 'rook']
+    # Initialize back rank with 'moved' flag
+    for i in range(8):
+        pieces.append({'type': types[i], 'color': 'white', 'pos': (i, 7), 'moved': False})
+        pieces.append({'type': types[i], 'color': 'black', 'pos': (i, 0), 'moved': False})
+    turn, game_over, white_time, black_time = "white", False, 600, 600
+    en_passant_target = None
+    last_time = time.time()
+
+def get_piece_at(pos, pieces_list):
+    for p in pieces_list:
+        if p['pos'] == pos: return p
+    return None
+
+
+
+def is_square_attacked(pos, color, pieces_list):
+    """Helper to check if a square is under attack without calling full check logic."""
+    enemy_color = "black" if color == "white" else "white"
+    for p in pieces_list:
+        if p['color'] == enemy_color:
+            # Pass check_castle=False to prevent infinite recursion
+            if pos in get_raw_moves(p, pieces_list, check_castle=False):
+                return True
+    return False
+
+def get_raw_moves(piece, pieces_list, check_castle=True):
+    moves = []
+    x, y = piece['pos']
+    enemy = "black" if piece['color'] == "white" else "white"
+
+    if piece['type'] == 'pawn':
+        dir = -1 if piece['color'] == "white" else 1
+        if not get_piece_at((x, y + dir), pieces_list):
+            moves.append((x, y + dir))
+            start = 6 if piece['color'] == "white" else 1
+            if y == start and not get_piece_at((x, y + 2*dir), pieces_list):
+                moves.append((x, y + 2*dir))
+        for dx in [-1, 1]:
+            t = get_piece_at((x + dx, y + dir), pieces_list)
+            if t and t['color'] == enemy: moves.append((x + dx, y + dir))
+            if (x + dx, y + dir) == en_passant_target: moves.append((x + dx, y + dir))
+
+    elif piece['type'] in ['rook', 'bishop', 'queen']:
+        dirs = []
+        if piece['type'] in ['rook', 'queen']: dirs += [(0,1), (0,-1), (1,0), (-1,0)]
+        if piece['type'] in ['bishop', 'queen']: dirs += [(1,1), (1,-1), (-1,1), (-1,-1)]
+        for dx, dy in dirs:
+            for i in range(1, 8):
+                target = (x + dx*i, y + dy*i)
+                if not (0 <= target[0] <= 7 and 0 <= target[1] <= 7): break
+                p_at = get_piece_at(target, pieces_list)
+                if p_at:
+                    if p_at['color'] == enemy: moves.append(target)
+                    break
+                moves.append(target)
+    
+    elif piece['type'] == 'knight':
+        jumps = [(2,1),(2,-1),(-2,1),(-2,-1),(1,2),(1,-2),(-1,2),(-1,-2)]
+        for dx, dy in jumps:
+            target = (x+dx, y+dy)
+            if 0<=target[0]<=7 and 0<=target[1]<=7:
+                p_at = get_piece_at(target, pieces_list)
+                if not p_at or p_at['color'] == enemy: moves.append(target)
+    
+    elif piece['type'] == 'king':
+        for dx in [-1,0,1]:
+            for dy in [-1,0,1]:
+                if dx==0 and dy==0: continue
+                target = (x+dx, y+dy)
+                if 0<=target[0]<=7 and 0<=target[1]<=7:
+                    p_at = get_piece_at(target, pieces_list)
+                    if not p_at or p_at['color'] == enemy: moves.append(target)
+        
+        # --- CASTLING LOGIC ---
+        if check_castle and not piece.get('moved', False) and not is_in_check(piece['color'], pieces_list):
+            # Kingside
+            r_rook = get_piece_at((7, y), pieces_list)
+            if r_rook and r_rook['type'] == 'rook' and not r_rook.get('moved', False):
+                if not get_piece_at((5, y), pieces_list) and not get_piece_at((6, y), pieces_list):
+                    if not is_square_attacked((5, y), piece['color'], pieces_list):
+                        moves.append((6, y))
+            # Queenside
+            l_rook = get_piece_at((0, y), pieces_list)
+            if l_rook and l_rook['type'] == 'rook' and not l_rook.get('moved', False):
+                if not get_piece_at((1, y), pieces_list) and not get_piece_at((2, y), pieces_list) and not get_piece_at((3, y), pieces_list):
+                    if not is_square_attacked((3, y), piece['color'], pieces_list):
+                        moves.append((2, y))
+    return moves
+
+def is_in_check(color, pieces_list):
+    king = next((p for p in pieces_list if p['type'] == 'king' and p['color'] == color), None)
+    if not king: return False
+    for p in pieces_list:
+        if p['color'] != color:
+            if king['pos'] in get_raw_moves(p, pieces_list, check_castle=False):
+                return True
+    return False
+
+def get_legal_moves(piece, pieces_list):
+    raw = get_raw_moves(piece, pieces_list)
+    legal = []
+    for move in raw:
+        temp = copy.deepcopy(pieces_list)
+        moving_p = next(p for p in temp if p['pos'] == piece['pos'])
+        target = get_piece_at(move, temp)
+        if target: temp.remove(target)
+        moving_p['pos'] = move
+        if not is_in_check(piece['color'], temp): legal.append(move)
+    return legal
+
+def promotion_menu(color):
+    options = ['queen', 'rook', 'bishop', 'knight']
+    while True:
+        pygame.draw.rect(screen, (20, 20, 20), (BOARD_SIZE//4, (HEIGHT//3) + 10, (BOARD_SIZE//2) + 15, 90))
+        for i, opt in enumerate(options):
+            img = IMAGES[f"{color[0]}_{opt}"]
+            screen.blit(img, (BOARD_SIZE//4 + i*SQ_SIZE + 16, HEIGHT//3 + 16))
+        pygame.display.flip()
+        for event in pygame.event.get():
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                mx, my = pygame.mouse.get_pos()
+                if HEIGHT//3 + 15 <= my <= HEIGHT//3 + 85:
+                    col = (mx - (BOARD_SIZE//4 + 15)) // SQ_SIZE
+                    if 0 <= col <= 3: return options[col]
+
+# --- 5. Main Loop ---
+reset_game()
+selected_piece = None
+valid_moves = []
+
+while True:
+    screen.fill((46, 50, 52))
+    if not game_over:
+        now = time.time()
+        if turn == "white": white_time -= (now - last_time)
+        else: black_time -= (now - last_time)
+        last_time = now
+        if white_time <= 0: game_over, winner = True, "Black (on time)"
+        elif black_time <= 0: game_over, winner = True, "White (on time)"
+
+    # Draw Board
+    for r in range(8):
+        for c in range(8):
+            color = WHITE_TILE if (r+c)%2 == 0 else BLACK_TILE
+            pygame.draw.rect(screen, color, (c*SQ_SIZE, r*SQ_SIZE, SQ_SIZE, SQ_SIZE))
+
+    # Draw Valid Move Hints
+    for m in valid_moves:
+        pygame.draw.circle(screen, (200, 0, 30), (m[0]*SQ_SIZE + SQ_SIZE//2, m[1]*SQ_SIZE + SQ_SIZE//2), 12)
+
+    # Draw Pieces
+    for p in pieces:
+        screen.blit(IMAGES[f"{p['color'][0]}_{p['type']}"], (p['pos'][0]*SQ_SIZE, p['pos'][1]*SQ_SIZE))
+
+    # Sidebar
+    pygame.draw.rect(screen, SIDEBAR_COLOR, (BOARD_SIZE, 0, SIDEBAR_WIDTH, HEIGHT))
+    w_min, w_sec = max(0, int(white_time//60)), max(0, int(white_time%60))
+    b_min, b_sec = max(0, int(black_time//60)), max(0, int(black_time%60))
+    screen.blit(font_main.render(f"Black: {b_min}:{b_sec:02}", True, (0,0,0)), (BOARD_SIZE+10, 50))
+    screen.blit(font_main.render(f"White: {w_min}:{w_sec:02}", True, (0,0,0)), (BOARD_SIZE+10, HEIGHT-80))
+    screen.blit(font_main.render(f"Turn: {turn.upper()}", True, (150,150,150)), (BOARD_SIZE+10, HEIGHT//2))
+
+    if game_over:
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill(SHADOW_COLOR)
+        screen.blit(overlay, (0,0))
+        msg = font_big.render("GAME OVER!", True, (255, 255, 255))
+        display_winner = winner.upper() if "Draw" in winner else f"{winner.upper()} WINS"
+        win_msg = font_main.render(display_winner, True, (200, 200, 200))
+        screen.blit(msg, (WIDTH//2 - msg.get_width()//2, HEIGHT//2 - 60))
+        screen.blit(win_msg, (WIDTH//2 - win_msg.get_width()//2, HEIGHT//2))
+
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT: pygame.quit(); exit()
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_r: reset_game()
+
+        if event.type == pygame.MOUSEBUTTONDOWN and not game_over:
+            mx, my = pygame.mouse.get_pos()
+            col, row = mx // SQ_SIZE, my // SQ_SIZE
+            if col < 8:
+                if (col, row) in valid_moves:
+                    # En Passant capture
+                    if selected_piece['type'] == 'pawn' and (col, row) == en_passant_target:
+                        v_dir = 1 if turn == "white" else -1
+                        victim = get_piece_at((col, row + v_dir), pieces)
+                        if victim: pieces.remove(victim)
+
+                    # Standard Capture
+                    target = get_piece_at((col, row), pieces)
+                    if target: pieces.remove(target)
+                    
+                    # Execute Castle (Move Rook)
+                    old_pos = selected_piece['pos']
+                    if selected_piece['type'] == 'king' and abs(col - old_pos[0]) == 2: 
+                        r_col = 7 if col == 6 else 0
+                        nr_col = 5 if col == 6 else 3
+                        rook = get_piece_at((r_col, row), pieces)
+                        if rook:
+                            rook['pos'] = (nr_col, row)
+                            rook['moved'] = True
+
+                    # Finalize Piece Move
+                    selected_piece['pos'] = (col, row)
+                    selected_piece['moved'] = True
+
+                    # Update En Passant Target
+                    if selected_piece['type'] == 'pawn' and abs(row - old_pos[1]) == 2:
+                        en_passant_target = (col, (row + old_pos[1]) // 2)
+                    else: en_passant_target = None
+
+                    # Promotion
+                    if selected_piece['type'] == 'pawn' and row in [0, 7]:
+                        selected_piece['type'] = promotion_menu(turn)
+
+                    # Switch Turn
+                    turn = "black" if turn == "white" else "white"
+                    selected_piece, valid_moves = None, []
+
+                    # --- Win/Draw Checks ---
+                    if len(pieces) == 2:
+                        game_over, winner = True, "Draw (Insufficient Material)"
+                    
+                    all_moves = []
+                    for p in pieces:
+                        if p['color'] == turn:
+                            all_moves += get_legal_moves(p, pieces)
+                    
+                    if not all_moves:
+                        game_over = True
+                        if is_in_check(turn, pieces):
+                            winner = "White" if turn == "black" else "Black"
+                        else:
+                            winner = "Draw (Stalemate)"
+                else:
+                    # Select new piece
+                    p = get_piece_at((col, row), pieces)
+                    if p and p['color'] == turn:
+                        selected_piece, valid_moves = p, get_legal_moves(p, pieces)
+                    else:
+                        selected_piece, valid_moves = None, []
+
+    pygame.display.flip()  
